@@ -28,7 +28,7 @@
 
 1. 下载或克隆本仓库到本地：
    ```bash
-   git clone https://github.com/your-username/aicatalog.git
+   git clone https://github.com/minjuanyue/AIcatalog.git
    ```
 
 2. 打开 Chrome，进入扩展管理页面：
