@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Catalog</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>AI Catalog</h1>
+    <p class="subtitle">Claude.ai 问题记录器</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="btn-export" title="导出全部数据为 JSON 文件">导出 JSON</button>
+    <button id="btn-clear" class="danger" title="清空所有记录（不可恢复）">清空所有</button>
+  </div>
+
+  <div id="chat-list">
+    <p class="empty-hint">暂无记录。打开 Claude.ai 对话后，问题将自动收集。</p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
