@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "AI Catalog - Claude Question Recorder",
-  "version": "1.0.0",
-  "description": "自动记录 Claude.ai 对话中的用户问题，支持快速回顾和定位",
+  "name": "AI Catalog - Question Recorder",
+  "version": "1.5.0",
+  "description": "自动记录 Claude.ai / ChatGPT 对话中的用户问题，支持快速回顾和导出",
   "permissions": ["storage"],
-  "host_permissions": ["https://claude.ai/*"],
+  "host_permissions": ["https://claude.ai/*", "https://chatgpt.com/*"],
   "content_scripts": [
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": ["https://claude.ai/*", "https://chatgpt.com/*"],
       "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"

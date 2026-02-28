@@ -27,14 +27,19 @@
   const HIGHLIGHT_CLASS = 'aic-highlight';
   const MAX_TITLE_LEN = 60;
 
-  // Verified against live claude.ai DOM (2026-02):
-  //   [data-testid="user-message"] → 5 matches ✓
-  //   Everything else             → 0 matches ✗
-  const USER_MESSAGE_SELECTORS = [
-    '[data-testid="user-message"]',   // current claude.ai (confirmed)
-    '[data-is-human-turn="true"]',    // possible future attribute
-    '[class*="HumanTurn"]',           // possible future class
-  ];
+  // ─── Site detection ──────────────────────────────────────────────────────────
+  const IS_CHATGPT = location.hostname.includes('chatgpt.com');
+
+  // User message selectors, per site.
+  // Claude  — verified live 2026-02: [data-testid="user-message"] ✓
+  // ChatGPT — stable attribute used by all major extensions since 2023 ✓
+  const USER_MESSAGE_SELECTORS = IS_CHATGPT
+    ? ['[data-message-author-role="user"]']
+    : [
+        '[data-testid="user-message"]',
+        '[data-is-human-turn="true"]',
+        '[class*="HumanTurn"]',
+      ];
 
   // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -47,10 +52,19 @@
   // async callbacks from a previous chat can detect staleness and bail.
   let chatVersion = 0;
 
+  // ─── Export / Select mode state ──────────────────────────────────────────────
+  let selectMode = false;
+  let selectedIds = new Set();
+
   // ─── Utilities ───────────────────────────────────────────────────────────────
 
   function extractChatId() {
-    const match = window.location.pathname.match(/\/chat\/([a-f0-9-]{36})/i);
+    // Claude:  /chat/{uuid}
+    // ChatGPT: /c/{uuid}
+    const pattern = IS_CHATGPT
+      ? /\/c\/([a-f0-9-]{36})/i
+      : /\/chat\/([a-f0-9-]{36})/i;
+    const match = window.location.pathname.match(pattern);
     return match ? match[1] : null;
   }
 
@@ -63,6 +77,13 @@
   }
 
   function getScrollContainer() {
+    if (IS_CHATGPT) {
+      return (
+        document.querySelector('main .overflow-y-auto') ||
+        document.querySelector('main') ||
+        document.documentElement
+      );
+    }
     return (
       document.querySelector('main [class*="overflow"]') ||
       document.querySelector('[class*="overflow-y-auto"]') ||
@@ -351,10 +372,17 @@
     panel.innerHTML = `
       <div id="aic-header">
         <span id="aic-title">AI Catalog</span>
-        <button id="aic-close-btn" title="关闭">✕</button>
+        <div id="aic-header-actions">
+          <button id="aic-export-btn" title="选择并导出">⬇</button>
+          <button id="aic-close-btn" title="关闭">✕</button>
+        </div>
       </div>
       <div id="aic-body">
         <p class="aic-empty">尚无记录的问题</p>
+      </div>
+      <div id="aic-footer">
+        <span id="aic-select-count">已选 0 条</span>
+        <button id="aic-generate-btn">生成文档</button>
       </div>
     `;
     shadowRoot.appendChild(panel);
@@ -367,6 +395,8 @@
 
     toggleBtn.addEventListener('click', togglePanel);
     shadowRoot.getElementById('aic-close-btn').addEventListener('click', closePanel);
+    shadowRoot.getElementById('aic-export-btn').addEventListener('click', toggleSelectMode);
+    shadowRoot.getElementById('aic-generate-btn').addEventListener('click', generateAndDownload);
   }
 
   function togglePanel() {
@@ -415,8 +445,10 @@
         const time = new Date(q.timestamp).toLocaleTimeString('zh-CN', {
           hour: '2-digit', minute: '2-digit',
         });
+        const isSelected = selectedIds.has(q.id);
         return `
-          <div class="aic-item" data-qid="${q.id}" title="${escapeAttr(q.text)}">
+          <div class="aic-item${isSelected ? ' selected' : ''}" data-qid="${q.id}" title="${escapeAttr(q.text)}">
+            <input type="checkbox" class="aic-checkbox" ${isSelected ? 'checked' : ''}>
             <span class="aic-index">${i + 1}</span>
             <span class="aic-text">${escapeHtml(short)}</span>
             <span class="aic-time">${time}</span>
@@ -425,8 +457,164 @@
       .join('');
 
     body.querySelectorAll('.aic-item').forEach((el) => {
-      el.addEventListener('click', () => scrollToQuestion(el.dataset.qid));
+      el.addEventListener('click', (e) => {
+        if (selectMode) {
+          e.preventDefault();
+          toggleSelectItem(el.dataset.qid, el);
+        } else {
+          scrollToQuestion(el.dataset.qid);
+        }
+      });
+      // Checkbox click: stop bubble (so item handler doesn't also fire),
+      // then manually call toggleSelectItem as the single source of truth.
+      el.querySelector('.aic-checkbox').addEventListener('click', (e) => {
+        if (selectMode) {
+          e.stopPropagation();
+          toggleSelectItem(el.dataset.qid, el);
+        }
+      });
     });
+
+    updateSelectFooter();
+  }
+
+  // ─── Select Mode ─────────────────────────────────────────────────────────────
+
+  function toggleSelectMode() {
+    selectMode ? exitSelectMode() : enterSelectMode();
+  }
+
+  function enterSelectMode() {
+    selectMode = true;
+    selectedIds.clear();
+    const btn = shadowRoot && shadowRoot.getElementById('aic-export-btn');
+    if (btn) { btn.textContent = '✕'; btn.title = '取消选择'; btn.classList.add('active'); }
+    const panel = shadowRoot && shadowRoot.getElementById('aic-panel');
+    if (panel) panel.classList.add('select-mode');
+    updatePanel();
+  }
+
+  function exitSelectMode() {
+    selectMode = false;
+    selectedIds.clear();
+    const btn = shadowRoot && shadowRoot.getElementById('aic-export-btn');
+    if (btn) { btn.textContent = '⬇'; btn.title = '选择并导出'; btn.classList.remove('active'); }
+    const panel = shadowRoot && shadowRoot.getElementById('aic-panel');
+    if (panel) panel.classList.remove('select-mode');
+    updatePanel();
+  }
+
+  function toggleSelectItem(id, itemEl) {
+    if (selectedIds.has(id)) {
+      selectedIds.delete(id);
+      itemEl.classList.remove('selected');
+      itemEl.querySelector('.aic-checkbox').checked = false;
+    } else {
+      selectedIds.add(id);
+      itemEl.classList.add('selected');
+      itemEl.querySelector('.aic-checkbox').checked = true;
+    }
+    updateSelectFooter();
+  }
+
+  function updateSelectFooter() {
+    if (!shadowRoot) return;
+    const footer = shadowRoot.getElementById('aic-footer');
+    const countEl = shadowRoot.getElementById('aic-select-count');
+    if (!footer || !countEl) return;
+    if (selectMode) {
+      footer.classList.add('visible');
+      countEl.textContent = `已选 ${selectedIds.size} 条`;
+    } else {
+      footer.classList.remove('visible');
+    }
+  }
+
+  // ─── AI Answer Extraction ─────────────────────────────────────────────────────
+
+  // Find the AI answer that follows a given user message node.
+  // Each site has a different DOM structure.
+  function findAiAnswer(userMsgNode) {
+    if (IS_CHATGPT) {
+      // ChatGPT structure:
+      //   article[data-testid="conversation-turn-N"]   ← user turn
+      //     └── [data-message-author-role="user"]      ← userMsgNode
+      //   article[data-testid="conversation-turn-N+1"] ← AI turn
+      //     └── [data-message-author-role="assistant"]
+      //           └── .markdown                        ← response text
+      let el = userMsgNode;
+      while (el && !(el.tagName === 'ARTICLE' && el.dataset.testid?.startsWith('conversation-turn'))) {
+        el = el.parentElement;
+      }
+      const aiTurn = el && el.nextElementSibling;
+      if (!aiTurn) return '';
+      const content = aiTurn.querySelector('.markdown') ||
+                      aiTurn.querySelector('[data-message-author-role="assistant"]');
+      return content ? (content.innerText || content.textContent || '').trim() : '';
+    }
+
+    // Claude structure:
+    //   div[data-testRenderCount] ← user turn
+    //     └── [data-testid="user-message"]             ← userMsgNode
+    //   div[data-testRenderCount] ← AI turn
+    //     └── .font-claude-response                    ← response text
+    let el = userMsgNode;
+    while (el && el.dataset.testRenderCount === undefined) el = el.parentElement;
+    const aiTurn = el && el.nextElementSibling;
+    if (!aiTurn) return '';
+    const content = aiTurn.querySelector('.font-claude-response');
+    return content ? (content.innerText || content.textContent || '').trim() : '';
+  }
+
+  // ─── Generate & Download ──────────────────────────────────────────────────────
+
+  async function generateAndDownload() {
+    if (selectedIds.size === 0) return;
+
+    const chatData = await getCurrentChatData();
+    if (!chatData) return;
+
+    // Keep questions in their original order
+    const selected = chatData.questions.filter((q) => selectedIds.has(q.id));
+    if (selected.length === 0) return;
+
+    const date = new Date().toLocaleDateString('zh-CN');
+    const lines = [`# ${chatData.title || 'Chat 导出'} - ${date}`, ''];
+
+    selected.forEach((q, i) => {
+      // Find the DOM node to extract the AI answer
+      const domNode = document.querySelector(`[data-aic-id="${q.id}"]`) ||
+        Array.from(document.querySelectorAll('[data-testid="user-message"]'))
+          .find((n) => (n.innerText || n.textContent || '').trim() === q.text.trim());
+
+      const aiAnswer = domNode ? findAiAnswer(domNode) : '';
+
+      lines.push(`## Q${i + 1}. ${q.text.slice(0, 60)}${q.text.length > 60 ? '…' : ''}`);
+      lines.push('');
+      lines.push(`**问题：** ${q.text}`);
+      lines.push('');
+      if (aiAnswer) {
+        lines.push(`**回答：**`);
+        lines.push('');
+        lines.push(aiAnswer);
+      } else {
+        lines.push('**回答：** （未能获取，请确保该消息在当前页面可见）');
+      }
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    });
+
+    const markdown = lines.join('\n');
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `aicatalog-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    exitSelectMode();
   }
 
   function escapeHtml(str) {
@@ -585,6 +773,71 @@
         color: var(--muted);
         margin-top: 2px;
       }
+
+      /* ── Header actions ── */
+      #aic-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      #aic-export-btn {
+        background: none;
+        border: none;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        transition: color 0.15s, background 0.15s;
+      }
+      #aic-export-btn:hover { color: var(--text); background: var(--hover-bg); }
+      #aic-export-btn.active { color: var(--accent); }
+
+      /* ── Checkbox (hidden by default, shown in select mode) ── */
+      .aic-checkbox {
+        display: none;
+        flex-shrink: 0;
+        width: 15px;
+        height: 15px;
+        margin-top: 3px;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      #aic-panel.select-mode .aic-checkbox { display: block; }
+
+      /* ── Selected item highlight ── */
+      .aic-item.selected {
+        background: var(--hover-bg);
+        border-color: var(--accent);
+      }
+
+      /* ── Footer bar ── */
+      #aic-footer {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        border-top: 1px solid var(--border);
+        background: var(--bg-header);
+        flex-shrink: 0;
+      }
+      #aic-footer.visible { display: flex; }
+      #aic-select-count {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      #aic-generate-btn {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.15s;
+      }
+      #aic-generate-btn:hover { opacity: 0.85; }
     `;
   }
 
@@ -620,19 +873,20 @@
   function handleUrlChange() {
     const newId = extractChatId();
     if (newId === currentChatId) return;
+
+    // If URL is a non-chat page (e.g. ChatGPT's "/" during navigation),
+    // don't wipe currentChatId — wait for the real chat URL to arrive.
+    if (!newId) return;
+
     dbg(` handleUrlChange ${currentChatId?.slice(0,8)} → ${newId?.slice(0,8)}`);
 
     // ── Display line (synchronous, immediate) ──────────────────────────────
-    // Update the chat ID first, then read storage[newId] and re-render.
-    // This is completely independent of the capture logic below.
     stampNodesWithChatId(currentChatId); // mark old nodes before ID changes
     stopObserver();
     currentChatId = newId;
     updatePanel(); // reads storage[newId] and renders — nothing else
 
     // ── Capture line (async, background) ──────────────────────────────────
-    // Restore stored IDs onto DOM nodes, capture any new ones, start observer.
-    // Runs entirely after the panel is already showing the correct chat.
     const chatId = newId;
     const myVersion = ++chatVersion;
 
@@ -642,12 +896,16 @@
       startObserver(chatId);
     });
 
-    // Re-scan once React has finished rendering the new chat's messages
-    setTimeout(async () => {
-      if (chatVersion !== myVersion) return;
-      await tagExistingNodes(chatId);
-      await captureUntaggedNodes(chatId);
-    }, 1000);
+    // ChatGPT loads chat history slower than Claude — retry at multiple
+    // intervals so we don't miss messages that render after 1 second.
+    const retryDelays = IS_CHATGPT ? [1000, 2000, 3500] : [1000];
+    retryDelays.forEach((delay) => {
+      setTimeout(async () => {
+        if (chatVersion !== myVersion) return;
+        await tagExistingNodes(chatId);
+        await captureUntaggedNodes(chatId);
+      }, delay);
+    });
   }
 
   // ─── Init ────────────────────────────────────────────────────────────────────
@@ -675,13 +933,16 @@
     captureUntaggedNodes(chatId); // async, runs in background
     startObserver(chatId);
 
-    // Re-scan after async content finishes loading (claude.ai loads messages
-    // asynchronously; this catches anything that wasn't in DOM yet above)
-    setTimeout(async () => {
-      if (chatVersion !== myVersion) return;
-      await tagExistingNodes(chatId);
-      await captureUntaggedNodes(chatId);
-    }, 1500);
+    // Re-scan after async content finishes loading.
+    // ChatGPT loads history slower, so use longer delays there.
+    const initDelays = IS_CHATGPT ? [1500, 3000] : [1500];
+    initDelays.forEach((delay) => {
+      setTimeout(async () => {
+        if (chatVersion !== myVersion) return;
+        await tagExistingNodes(chatId);
+        await captureUntaggedNodes(chatId);
+      }, delay);
+    });
   }
 
   if (document.readyState === 'loading') {
